@@ -171,61 +171,72 @@ class Agent():
         self.update_network_parameters(tau=1)
 
     def choose_action(self, observation):
-        if self.time_step < self.warmup:
+        if self.time_step < self.warmup: #在预热期（self.time_step < self.warmup）内，动作是随机生成的。这是通过从一个以 self.noise 为标准差的正态分布中随机抽样来实现的。这个过程有助于在学习开始阶段填充经验回放缓冲区，并增加初始的探索。
             mu = T.tensor(np.random.normal(scale=self.noise, 
                                             size=(self.n_actions,)))
+        
+        #预热期结束后，代理使用其Actor网络来选择动作。首先，当前观察值（observation）被转换为张量（T.tensor），并发送到Actor网络所在的设备（CPU或GPU）。然后，通过Actor网络的前向传递（forward 方法）来生成动作值 mu。
         else:
             state = T.tensor(observation, dtype=T.float).to(self.actor.device)
             mu = self.actor.forward(state).to(self.actor.device)
+        
+        # 为了增加探索性，生成的动作 mu 会加上一些噪声。这个噪声同样是从一个正态分布中抽样得到的，其标准差为 self.noise。这样做可以防止代理在学习过程中过早收敛到局部最优解。
         mu_prime = mu + T.tensor(np.random.normal(scale=self.noise),
                                     dtype=T.float).to(self.actor.device)
 
+        # 接着，使用 T.clamp 函数将加噪声后的动作值 mu_prime 限制在环境允许的动作范围内（即 self.min_action 到 self.max_action 之间）。这是必要的步骤，以确保生成的动作对环境有效。
         mu_prime = T.clamp(mu_prime, self.min_action[0], self.max_action[0])
-        self.time_step += 1
+        self.time_step += 1 #每次调用 choose_action 方法时，时间步 self.time_step 都会递增。这个计数器用于跟踪代理与环境交互的总次数，以及控制何时结束预热期。
 
         return mu_prime.cpu().detach().numpy()
-
-    def remember(self, state, action, reward, new_state, done):
-        self.memory.store_transition(state, action, reward, new_state, done)
+    
+    
+    def remember(self, state, action, reward, new_state, done):# 这行定义了 remember 方法，它接收五个参数：state（当前状态），action（代理采取的动作），reward（执行动作后获得的奖励），new_state（执行动作后的新状态），和 done（一个布尔值，表示是否达到终止状态）
+        self.memory.store_transition(state, action, reward, new_state, done)#这行代码调用了代理中 memory 属性（一个 ReplayBuffer 实例）的 store_transition 方法，将传入的经验元组保存到经验回放缓冲区中。store_transition 方法负责在缓冲区中找到正确的位置存储这些值，并管理缓冲区的大小，确保当缓冲区满时，能够按照某种策略（如覆盖最早的记录）进行处理。
 
     def learn(self):
-        if self.memory.mem_cntr < self.batch_size:
+        if self.memory.mem_cntr < self.batch_size:#检查是否有足够的样本进行学习
             return 
         state, action, reward, new_state, done = \
-                self.memory.sample_buffer(self.batch_size)
+                self.memory.sample_buffer(self.batch_size)#从经验回放缓冲区中随机采样一批数据，每个数据包括状态、动作、奖励、下一个状态和结束标志。
 
+        # 将采样的数据转换为PyTorch张量，并移动到相应的设备上（GPU或CPU）。
         reward = T.tensor(reward, dtype=T.float).to(self.critic_1.device)
         done = T.tensor(done).to(self.critic_1.device)
         state_ = T.tensor(new_state, dtype=T.float).to(self.critic_1.device)
         state = T.tensor(state, dtype=T.float).to(self.critic_1.device)
         action = T.tensor(action, dtype=T.float).to(self.critic_1.device)
         
+        #生成目标动作并添加噪声
         target_actions = self.target_actor.forward(state_)
         target_actions = target_actions + \
-                T.clamp(T.tensor(np.random.normal(scale=0.2)), -0.5, 0.5)
+                T.clamp(T.tensor(np.random.normal(scale=0.2)), -0.5, 0.5) #确保添加到动作上的噪声值在 [-0.5, 0.5] 的范围内
         target_actions = T.clamp(target_actions, self.min_action[0], 
-                                self.max_action[0])
+                                self.max_action[0])#确保添加到动作上的噪声值在 action 的范围内
         
+        #使用目标Critic网络和带噪声的目标动作来评估下一个状态的Q值。
         q1_ = self.target_critic_1.forward(state_, target_actions)
         q2_ = self.target_critic_2.forward(state_, target_actions)
 
         q1 = self.critic_1.forward(state, action)
         q2 = self.critic_2.forward(state, action)
 
+        #如果结束了Q就设为零
         q1_[done] = 0.0
         q2_[done] = 0.0
 
+        # 不管 q1_ 和 q2_ 原来的形状是什么，.view(-1) 都会将它们展平成一个一维向量，其中包含了所有原始元素
         q1_ = q1_.view(-1)
         q2_ = q2_.view(-1)
 
-        critic_value_ = T.min(q1_, q2_)
+        critic_value_ = T.min(q1_, q2_) #函数计算两个预测中的逐元素最小值，生成一个新的张量
 
-        target = reward + self.gamma*critic_value_
+        target = reward + self.gamma*critic_value_ #计算目标Q值
         target = target.view(self.batch_size, 1)
 
+        #计算当前Critic网络的Q值与目标Q值之间的均方误差损失，然后反向传播误差，更新Critic网络的权重
         self.critic_1.optimizer.zero_grad()
         self.critic_2.optimizer.zero_grad()
-
         q1_loss = F.mse_loss(target, q1)
         q2_loss = F.mse_loss(target, q2)
         critic_loss = q1_loss + q2_loss
@@ -248,8 +259,9 @@ class Agent():
 
     def update_network_parameters(self, tau=None):
         if tau is None:
-            tau = self.tau
-
+            tau = self.tau#用于软更新目标网络的参数
+        
+        #使用.named_parameters()获取网络参数，这个方法返回一个生成器，包含参数的名称和值。
         actor_params = self.actor.named_parameters()
         critic_1_params = self.critic_1.named_parameters()
         critic_2_params = self.critic_2.named_parameters()
@@ -257,6 +269,7 @@ class Agent():
         target_critic_1_params = self.target_critic_1.named_parameters()
         target_critic_2_params = self.target_critic_2.named_parameters()
 
+        #将参数名称和值对存储在字典中，方便后续按名称更新参数。
         critic_1 = dict(critic_1_params)
         critic_2 = dict(critic_2_params)
         actor = dict(actor_params)
@@ -264,6 +277,7 @@ class Agent():
         target_critic_1 = dict(target_critic_1_params)
         target_critic_2 = dict(target_critic_2_params)
 
+        #以下循环实现了软更新机制：对每个参数，计算一个新值，该值是当前网络参数和目标网络参数的加权平均。clone()方法用于复制参数，以避免在原地修改导致的问题。
         for name in critic_1:
             critic_1[name] = tau*critic_1[name].clone() + \
                     (1-tau)*target_critic_1[name].clone()
@@ -276,9 +290,11 @@ class Agent():
             actor[name] = tau*actor[name].clone() + \
                     (1-tau)*target_actor[name].clone()
 
+        #更新目标网络的参数：使用.load_state_dict()方法将计算出的新参数设置给目标网络。
         self.target_critic_1.load_state_dict(critic_1)
         self.target_critic_2.load_state_dict(critic_2)
         self.target_actor.load_state_dict(actor)
+
 
     def save_models(self):
         self.actor.save_checkpoint()
