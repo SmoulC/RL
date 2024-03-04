@@ -16,8 +16,8 @@ class ReplayBuffer():
         self.terminal_memory = np.zeros(self.mem_size, dtype=np.bool) #terminal_memory 是一个布尔数组，用于标记每个状态是否为终止状态。
 
     def store_transition(self, state, action, reward, state_, done): #(存储经验)方法用于在回放缓冲区中存储一个经验样本，包括当前状态、采取的动作、获得的奖励、下一状态以及是否结束
-        index = self.mem_cntr % self.mem_size
-        self.state_memory[index] = state
+        index = self.mem_cntr % self.mem_size #用来判断缓存区是否满了
+        self.state_memory[index] = state 
         self.new_state_memory[index] = state_
         self.terminal_memory[index] = done
         self.reward_memory[index] = reward
