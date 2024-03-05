@@ -269,7 +269,7 @@ class Agent():
         target_critic_1_params = self.target_critic_1.named_parameters()
         target_critic_2_params = self.target_critic_2.named_parameters()
 
-        #将参数名称和值对存储在字典中，方便后续按名称更新参数。
+        #将参数名称和值对存储在字典中，方便后续按名称更新。
         critic_1 = dict(critic_1_params)
         critic_2 = dict(critic_2_params)
         actor = dict(actor_params)
